@@ -1,173 +1,138 @@
-using System;
-using System.Threading;
+using System.Text.Json.Serialization;
+using RfidReaderRaspberry.Models;
+using RfidReaderRaspberry.Services;
 
-namespace RfidReaderRaspberry
+var builder = WebApplication.CreateBuilder(args);
+
+// Configura para escutar em todas as interfaces
+builder.WebHost.UseUrls("http://0.0.0.0:5000");
+
+// JSON: enums como string, ignora nulls
+builder.Services.ConfigureHttpJsonOptions(options =>
 {
-    /// <summary>
-    /// Leitor RFID para Raspberry Pi via Mono.
-    /// Build: Windows (.NET Framework 4.8)
-    /// Execucao: Raspberry Pi (Mono)
-    /// </summary>
-    class Program
+    options.SerializerOptions.Converters.Add(new JsonStringEnumConverter());
+    options.SerializerOptions.DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull;
+});
+
+// Serviços
+builder.Services.AddSingleton<RfidService>();
+builder.Services.AddEndpointsApiExplorer();
+builder.Services.AddSwaggerGen(c =>
+{
+    c.SwaggerDoc("v1", new() { Title = "BOX RFID API", Version = "v1" });
+});
+
+var app = builder.Build();
+
+// Swagger (desenvolvimento e produção para facilitar testes)
+app.UseSwagger();
+app.UseSwaggerUI();
+
+// ==================== ENDPOINTS ====================
+
+// Health check simples
+app.MapGet("/health", () => Results.Ok(new { status = "healthy", timestamp = DateTime.UtcNow }))
+    .WithName("Health")
+    .WithTags("Sistema");
+
+// Status completo do BOX
+app.MapGet("/status", (RfidService rfid) => Results.Ok(rfid.GetStatus()))
+    .WithName("GetStatus")
+    .WithTags("Sistema");
+
+// Configurar BOX
+app.MapPost("/config", (BoxConfig config, RfidService rfid) =>
+{
+    try
     {
-        // Configuracoes padrao
-        private const string DEFAULT_READER_IP = "192.168.0.242";
-        private const int DEFAULT_READ_DURATION = 30;
-
-        static void Main(string[] args)
-        {
-            Console.WriteLine("===========================================");
-            Console.WriteLine("  RFID Reader - Raspberry Pi Edition");
-            Console.WriteLine("  Mono Compatible");
-            Console.WriteLine("===========================================\n");
-
-            string readerIp = DEFAULT_READER_IP;
-            int duration = DEFAULT_READ_DURATION;
-
-            // Processa argumentos de linha de comando
-            if (args.Length >= 1)
-            {
-                readerIp = args[0];
-            }
-            if (args.Length >= 2)
-            {
-                int.TryParse(args[1], out duration);
-                if (duration <= 0) duration = DEFAULT_READ_DURATION;
-            }
-
-            Console.WriteLine("IP do Leitor: " + readerIp);
-            Console.WriteLine("Duracao da leitura: " + duration + " segundos\n");
-
-            TagCounter tagCounter = new TagCounter();
-            RfidReader reader = null;
-
-            try
-            {
-                reader = new RfidReader(tagCounter);
-
-                // Conecta ao leitor
-                reader.Connect(readerIp);
-
-                // Pergunta modo de inventario
-                InventoryMode mode = AskInventoryMode();
-
-                // Configura o leitor
-                reader.Configure(mode);
-
-                // Aguarda usuario
-                Console.WriteLine("\nPressione ENTER para iniciar leitura de " + duration + " segundos...");
-                Console.ReadLine();
-
-                // Limpa contadores
-                tagCounter.Clear();
-                DateTime startTime = DateTime.Now;
-
-                // Inicia leitura
-                reader.StartReading();
-
-                // Loop de monitoramento
-                for (int i = 0; i < duration; i++)
-                {
-                    Thread.Sleep(1000);
-                    PrintProgress(i + 1, tagCounter.UniqueTagCount, tagCounter.TotalReads);
-                }
-
-                // Para leitura
-                reader.StopReading();
-
-                // Exibe resultados
-                PrintResults(startTime, tagCounter);
-
-                // Desconecta
-                reader.Disconnect();
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine("\nERRO: " + ex.Message);
-                if (ex.InnerException != null)
-                {
-                    Console.WriteLine("Detalhe: " + ex.InnerException.Message);
-                }
-            }
-            finally
-            {
-                if (reader != null)
-                {
-                    reader.Dispose();
-                }
-            }
-
-            Console.WriteLine("\nEncerrado. Pressione qualquer tecla.");
-            try
-            {
-                Console.ReadKey();
-            }
-            catch
-            {
-                // No Mono/Linux pode nao ter suporte a ReadKey em alguns terminais
-                Console.ReadLine();
-            }
-        }
-
-        static InventoryMode AskInventoryMode()
-        {
-            Console.WriteLine("\nEscolha o modo de inventario:");
-            Console.WriteLine("1 - Single Target (Largada)");
-            Console.WriteLine("2 - Dual Target (Chegada)");
-            Console.Write("Opcao: ");
-
-            while (true)
-            {
-                string input = Console.ReadLine();
-
-                if (input == "1")
-                {
-                    Console.WriteLine("\nModo selecionado: SINGLE TARGET");
-                    return InventoryMode.SingleTarget;
-                }
-                else if (input == "2")
-                {
-                    Console.WriteLine("\nModo selecionado: DUAL TARGET");
-                    return InventoryMode.DualTarget;
-                }
-                else
-                {
-                    Console.Write("Opcao invalida. Digite 1 ou 2: ");
-                }
-            }
-        }
-
-        static void PrintProgress(int seconds, int uniqueTags, int totalReads)
-        {
-            // Usa \r para sobrescrever a linha (compativel com Mono)
-            string line = string.Format(
-                "\rTempo: {0:D2}s | Tags unicas: {1:D3} | Total leituras: {2:D5}",
-                seconds, uniqueTags, totalReads
-            );
-            Console.Write(line);
-        }
-
-        static void PrintResults(DateTime startTime, TagCounter tagCounter)
-        {
-            TimeSpan duration = DateTime.Now - startTime;
-            int totalReads = tagCounter.TotalReads;
-            int uniqueTags = tagCounter.UniqueTagCount;
-            double rps = totalReads / duration.TotalSeconds;
-
-            Console.WriteLine("\n");
-            Console.WriteLine("========== RESULTADO ==========");
-            Console.WriteLine("Duracao: " + duration.TotalSeconds.ToString("F1") + "s");
-            Console.WriteLine("Tags unicas: " + uniqueTags);
-            Console.WriteLine("Total leituras: " + totalReads);
-            Console.WriteLine("Taxa media: " + rps.ToString("F1") + " reads/s");
-
-            if (uniqueTags > 0)
-            {
-                double avg = tagCounter.GetAverageReadsPerTag();
-                Console.WriteLine("Media por tag: " + avg.ToString("F1"));
-            }
-
-            Console.WriteLine("================================");
-        }
+        rfid.UpdateConfig(config);
+        return Results.Ok(new { success = true, message = "Configuração atualizada" });
     }
-}
+    catch (Exception ex)
+    {
+        return Results.BadRequest(new { success = false, message = ex.Message });
+    }
+})
+    .WithName("SetConfig")
+    .WithTags("Configuração");
+
+// Iniciar modo teste
+app.MapPost("/test/start", async (RfidService rfid) =>
+{
+    try
+    {
+        await rfid.StartTestAsync();
+        return Results.Ok(new { success = true, message = "Modo teste iniciado" });
+    }
+    catch (Exception ex)
+    {
+        return Results.BadRequest(new { success = false, message = ex.Message });
+    }
+})
+    .WithName("StartTest")
+    .WithTags("Teste");
+
+// Parar modo teste
+app.MapPost("/test/stop", (RfidService rfid) =>
+{
+    rfid.Stop();
+    return Results.Ok(new { success = true, message = "Modo teste parado" });
+})
+    .WithName("StopTest")
+    .WithTags("Teste");
+
+// Resultados do teste
+app.MapGet("/test/results", (RfidService rfid) =>
+{
+    var results = rfid.GetTestResults();
+    return Results.Ok(new
+    {
+        mode = rfid.CurrentMode.ToString(),
+        totalRfReads = rfid.TotalRfReads,
+        uniqueTags = results.Count,
+        tags = results.OrderByDescending(kv => kv.Value)
+                      .Select(kv => new { epc = kv.Key, count = kv.Value })
+    });
+})
+    .WithName("GetTestResults")
+    .WithTags("Teste");
+
+// Iniciar leitura (modo normal)
+app.MapPost("/start", async (RfidService rfid) =>
+{
+    try
+    {
+        await rfid.StartReadingAsync();
+        return Results.Ok(new { success = true, message = "Leitura iniciada" });
+    }
+    catch (Exception ex)
+    {
+        return Results.BadRequest(new { success = false, message = ex.Message });
+    }
+})
+    .WithName("StartReading")
+    .WithTags("Leitura");
+
+// Parar leitura
+app.MapPost("/stop", (RfidService rfid) =>
+{
+    rfid.Stop();
+    return Results.Ok(new { success = true, message = "Leitura parada" });
+})
+    .WithName("StopReading")
+    .WithTags("Leitura");
+
+// ==================== STARTUP ====================
+
+var config = app.Configuration.GetSection("Box").Get<BoxConfig>();
+var logger = app.Services.GetRequiredService<ILogger<Program>>();
+
+logger.LogInformation("===========================================");
+logger.LogInformation("  BOX RFID - Raspberry Pi");
+logger.LogInformation("  API rodando em http://0.0.0.0:5000");
+logger.LogInformation("  Swagger: http://localhost:5000/swagger");
+logger.LogInformation("===========================================");
+logger.LogInformation("BoxId: {BoxId}", config?.BoxId ?? "não configurado");
+logger.LogInformation("Leitores configurados: {Count}", config?.Leitores?.Count ?? 0);
+
+app.Run();
