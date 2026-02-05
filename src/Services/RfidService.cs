@@ -17,6 +17,7 @@ public class RfidService : IDisposable
 
     private BoxOperationMode _currentMode = BoxOperationMode.Stopped;
     private DateTime? _startedAt;
+    private DateTime? _stoppedAt;
     private int _totalRfReads;
 
     public event Action<string, int, int>? OnTagRead; // epc, readerId, antenna
@@ -106,18 +107,19 @@ public class RfidService : IDisposable
 
         _logger.LogInformation("Parando leitura...");
 
+        _stoppedAt = DateTime.UtcNow;
+
         StopAllReaders();
         DisconnectAll();
 
         _currentMode = BoxOperationMode.Stopped;
-        _startedAt = null;
 
         _logger.LogInformation("Leitura parada. Total RF reads: {Total}, Tags únicas: {Unique}",
             _totalRfReads, _tagCounts.Count);
     }
 
     /// <summary>
-    /// Retorna resultados do modo teste
+    /// Retorna resultados do modo teste (simples)
     /// </summary>
     public Dictionary<string, int> GetTestResults()
     {
@@ -125,6 +127,65 @@ public class RfidService : IDisposable
         {
             return new Dictionary<string, int>(_tagCounts);
         }
+    }
+
+    /// <summary>
+    /// Retorna resultados detalhados do modo teste (por leitor e antena)
+    /// </summary>
+    public TestResults GetDetailedTestResults()
+    {
+        var duracao = 0.0;
+        if (_startedAt.HasValue)
+        {
+            var end = _stoppedAt ?? DateTime.UtcNow;
+            duracao = (end - _startedAt.Value).TotalSeconds;
+        }
+
+        var results = new TestResults
+        {
+            Mode = _currentMode,
+            DuracaoSegundos = Math.Round(duracao, 1),
+            TotalRfReads = _totalRfReads,
+            UniqueTags = _tagCounts.Count
+        };
+
+        // Resultados por leitor
+        foreach (var kvp in _readers)
+        {
+            var reader = kvp.Value;
+            var leitorResult = new LeitorTestResult
+            {
+                Id = kvp.Key,
+                Ip = reader.Ip,
+                TotalReads = reader.TotalReads
+            };
+
+            // Resultados por antena
+            foreach (var antenaKvp in reader.AntennaReads)
+            {
+                leitorResult.Antenas.Add(new AntennaCount
+                {
+                    Numero = antenaKvp.Key,
+                    Reads = antenaKvp.Value
+                });
+            }
+
+            // Ordenar antenas por número
+            leitorResult.Antenas = leitorResult.Antenas.OrderBy(a => a.Numero).ToList();
+
+            results.Leitores.Add(leitorResult);
+        }
+
+        // Tags com contagem (ordenadas por contagem decrescente)
+        lock (_lock)
+        {
+            results.Tags = _tagCounts
+                .OrderByDescending(kv => kv.Value)
+                .Select(kv => new TagCount { Epc = kv.Key, Count = kv.Value })
+                .ToList();
+        }
+
+        return results;
     }
 
     /// <summary>
@@ -276,10 +337,13 @@ internal class ReaderInstance
     private readonly ILogger _logger;
     private readonly ImpinjReader _reader;
     private volatile bool _isReading;
+    private readonly ConcurrentDictionary<int, int> _antennaReads = new();
 
     public ReaderConnectionState State { get; set; } = ReaderConnectionState.Disconnected;
     public string? ErrorMessage { get; set; }
     public int TotalReads { get; private set; }
+    public string Ip => _config.Ip;
+    public IReadOnlyDictionary<int, int> AntennaReads => _antennaReads;
 
     public event Action<int, List<TagData>>? OnTagsReported;
 
@@ -360,14 +424,20 @@ internal class ReaderInstance
 
         foreach (Tag tag in report)
         {
+            var antenna = tag.AntennaPortNumber;
+
             tags.Add(new TagData
             {
                 Epc = tag.Epc.ToString(),
-                Antenna = tag.AntennaPortNumber,
+                Antenna = antenna,
                 Rssi = tag.PeakRssiInDbm,
                 Timestamp = DateTime.UtcNow
             });
+
             TotalReads++;
+
+            // Contagem por antena
+            _antennaReads.AddOrUpdate(antenna, 1, (_, count) => count + 1);
         }
 
         if (tags.Count > 0)

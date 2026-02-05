@@ -15,6 +15,7 @@ builder.Services.ConfigureHttpJsonOptions(options =>
 });
 
 // Serviços
+builder.Services.AddSingleton<LogService>();
 builder.Services.AddSingleton<RfidService>();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen(c =>
@@ -41,15 +42,17 @@ app.MapGet("/status", (RfidService rfid) => Results.Ok(rfid.GetStatus()))
     .WithTags("Sistema");
 
 // Configurar BOX
-app.MapPost("/config", (BoxConfig config, RfidService rfid) =>
+app.MapPost("/config", (BoxConfig config, RfidService rfid, LogService log) =>
 {
     try
     {
         rfid.UpdateConfig(config);
+        log.LogConfig(config.EventoId, config.Checkpoint, config.Leitores?.Count ?? 0);
         return Results.Ok(new { success = true, message = "Configuração atualizada" });
     }
     catch (Exception ex)
     {
+        log.LogError(ex.Message);
         return Results.BadRequest(new { success = false, message = ex.Message });
     }
 })
@@ -57,15 +60,17 @@ app.MapPost("/config", (BoxConfig config, RfidService rfid) =>
     .WithTags("Configuração");
 
 // Iniciar modo teste
-app.MapPost("/test/start", async (RfidService rfid) =>
+app.MapPost("/test/start", async (RfidService rfid, LogService log) =>
 {
     try
     {
         await rfid.StartTestAsync();
+        log.LogTestStart(rfid.Config.EventoId, rfid.Config.Checkpoint);
         return Results.Ok(new { success = true, message = "Modo teste iniciado" });
     }
     catch (Exception ex)
     {
+        log.LogError(ex.Message, rfid.Config.EventoId, rfid.Config.Checkpoint);
         return Results.BadRequest(new { success = false, message = ex.Message });
     }
 })
@@ -73,40 +78,33 @@ app.MapPost("/test/start", async (RfidService rfid) =>
     .WithTags("Teste");
 
 // Parar modo teste
-app.MapPost("/test/stop", (RfidService rfid) =>
+app.MapPost("/test/stop", (RfidService rfid, LogService log) =>
 {
     rfid.Stop();
-    return Results.Ok(new { success = true, message = "Modo teste parado" });
+    var results = rfid.GetDetailedTestResults();
+    log.LogTestStop(results, rfid.Config.EventoId, rfid.Config.Checkpoint);
+    return Results.Ok(new { success = true, message = "Modo teste parado", results });
 })
     .WithName("StopTest")
     .WithTags("Teste");
 
-// Resultados do teste
-app.MapGet("/test/results", (RfidService rfid) =>
-{
-    var results = rfid.GetTestResults();
-    return Results.Ok(new
-    {
-        mode = rfid.CurrentMode.ToString(),
-        totalRfReads = rfid.TotalRfReads,
-        uniqueTags = results.Count,
-        tags = results.OrderByDescending(kv => kv.Value)
-                      .Select(kv => new { epc = kv.Key, count = kv.Value })
-    });
-})
+// Resultados do teste (detalhados por leitor e antena)
+app.MapGet("/test/results", (RfidService rfid) => Results.Ok(rfid.GetDetailedTestResults()))
     .WithName("GetTestResults")
     .WithTags("Teste");
 
 // Iniciar leitura (modo normal)
-app.MapPost("/start", async (RfidService rfid) =>
+app.MapPost("/start", async (RfidService rfid, LogService log) =>
 {
     try
     {
         await rfid.StartReadingAsync();
+        log.LogStart(rfid.Config.EventoId, rfid.Config.Checkpoint);
         return Results.Ok(new { success = true, message = "Leitura iniciada" });
     }
     catch (Exception ex)
     {
+        log.LogError(ex.Message, rfid.Config.EventoId, rfid.Config.Checkpoint);
         return Results.BadRequest(new { success = false, message = ex.Message });
     }
 })
@@ -114,13 +112,22 @@ app.MapPost("/start", async (RfidService rfid) =>
     .WithTags("Leitura");
 
 // Parar leitura
-app.MapPost("/stop", (RfidService rfid) =>
+app.MapPost("/stop", (RfidService rfid, LogService log) =>
 {
+    var duracao = rfid.StartedAt.HasValue ? (DateTime.UtcNow - rfid.StartedAt.Value).TotalSeconds : 0;
     rfid.Stop();
+    log.LogStop(duracao, 0, rfid.Config.EventoId, rfid.Config.Checkpoint); // TODO: passar total de eventos quando tiver persistência
     return Results.Ok(new { success = true, message = "Leitura parada" });
 })
     .WithName("StopReading")
     .WithTags("Leitura");
+
+// ==================== LOG ====================
+
+// Histórico de operações
+app.MapGet("/log", (LogService log, int? last) => Results.Ok(log.GetLogs(last)))
+    .WithName("GetLog")
+    .WithTags("Log");
 
 // ==================== STARTUP ====================
 
